@@ -4,7 +4,8 @@
 
 CodeBuddy 是住在云吞里的 Agent：腾讯的 CodeBuddy Code（官方 `--acp` 接口）用核心分配的 Matrix 身份和主人聊天，
 经 Wonton MCP 总线调用工具。模型网关接好时默认走网关，不用账号、也不用填 key；没接网关时 Agent 照常启动，
-在 App 的插件页或聊天里发 `/wonton login` 登录 —— 微信账号、Google / GitHub 账号，或贴一个自己的 API key。
+在 App 的插件页打开登录网页（默认 Bot），或在聊天里发 `/wonton login`（这个聊天对应的 Bot）登录 ——
+微信账号、Google / GitHub 账号，或贴一个自己的 API key。
 
 登录态和 key 都在插件数据目录里，容器重建后还在；网关接入或卸掉后重启容器即切换，网关只覆盖模型请求那一层，
 账号凭据和用户自己的 key 不动。
@@ -20,7 +21,7 @@ docker build -t ghcr.io/geraldpeng6/wonton-plugin-codebuddy:0.1.0 -f images/wont
 
 ## 登录
 
-第一次用先在 App 的插件页或聊天里发 `/wonton login`，三选一：
+第一次用先在插件页的登录网页（默认 Bot）或聊天里发 `/wonton login`（这个聊天对应的 Bot），三选一：
 
 - **微信账号**（国内站）：点登录后把链接在任意浏览器打开，微信扫码。
 - **Google / GitHub 账号**（国际站）：同样的链接流程，用 Google 或 GitHub 登录。

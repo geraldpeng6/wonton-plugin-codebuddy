@@ -23,9 +23,9 @@ services:
       # 出网代理由核心注入：登录和登录后的官方模型请求经它出去，内部地址核心已写进
       # NO_PROXY，不会绕道。这里不写代理变量，写了空值就会把核心的注入顶掉。
     volumes:
-      - ${WONTON_APP_DATA:?需要插件数据目录}/agent:/data/agent
-      - ${WONTON_APP_DATA}/run:/data/run
-      - ${WONTON_APP_DATA}/workspace:/workspace
+      - ${WONTON_BOT_DATA:?需要 Bot 数据目录}/agent:/data/agent
+      - ${WONTON_BOT_DATA}/run:/data/run
+      - ${WONTON_BOT_DATA}/workspace:/workspace
     healthcheck:
       # socket 是入口建好 ACP 转发后才有的，有这个文件就说明 Agent 侧能接连接。
       test: ["CMD", "test", "-S", "/data/run/acp.sock"]
@@ -53,8 +53,8 @@ services:
       WONTON_MATRIX_HOME_ROOM: ${WONTON_MATRIX_HOME_ROOM:?需要主人与 Bot 的主房间}
       WONTON_MCP_URL: ${WONTON_MCP_URL:?需要 MCP 总线地址}
     volumes:
-      - ${WONTON_APP_DATA}/bridge:/data/bridge
-      - ${WONTON_APP_DATA}/run:/data/run
+      - ${WONTON_BOT_DATA}/bridge:/data/bridge
+      - ${WONTON_BOT_DATA}/run:/data/run
     healthcheck:
       test: ["CMD", "test", "-S", "/data/run/acp.sock"]
       interval: 30s
@@ -85,15 +85,16 @@ x-wonton:
   about:
     zh: |
       CodeBuddy 以 Bot 的身份住进聊天：模型网关接好时默认走网关，不用账号，也不用填任何 key。
-      没接网关时，在 App 的插件页或聊天里发 /wonton login：用微信或 Google / GitHub 账号登录，
-      或者贴一个自己的 CodeBuddy API key。它住在自己的容器里工作，改文件、跑命令之前经确认卡片问你；
-      Wonton 插件的工具也从聊天里调。
+      没接网关时，在插件页的登录网页（默认 Bot）或聊天里发 /wonton login（这个聊天对应的 Bot）：
+      用微信或 Google / GitHub 账号登录，或者贴一个自己的 CodeBuddy API key。它住在自己的容器=里工作，
+      改文件、跑命令之前经确认卡片问你；Wonton 插件的工具也从聊天里调。
     en: |
       CodeBuddy lives in the chat as a bot: when the model gateway is connected it goes through the
-      gateway by default, with no account and no key to fill in. Without the gateway, use the plugin
-      page in the app or send /wonton login in the chat: sign in with WeChat or Google / GitHub, or
-      paste your own CodeBuddy API key. It works in its own container and asks through confirmation
-      cards before editing files or running commands; Wonton plugin tools are called from the chat too.
+      gateway by default, with no account and no key to fill in. Without the gateway, use the login
+      page on the plugin screen (default bot) or send /wonton login in the chat (this chat's bot):
+      sign in with WeChat or Google / GitHub, or paste your own CodeBuddy API key. It works in its
+      own container and asks through confirmation cards before editing files or running commands;
+      Wonton plugin tools are called from the chat too.
   release_notes:
     zh: 首个版本：模型网关可选，没接网关时用微信 / Google / GitHub 账号或自己的 API key 登录；登录网页和 /wonton login 都从 ACP 取链接。
     en: >-
@@ -111,6 +112,8 @@ x-wonton:
         title: { zh: CodeBuddy API key, en: CodeBuddy API key }
   bot:
     display_name: { zh: CodeBuddy, en: CodeBuddy }
+  bots:
+    services: [agent, bridge]
   permissions:
     - matrix.bot
     - tools
