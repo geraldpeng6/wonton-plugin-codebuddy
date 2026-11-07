@@ -52,6 +52,8 @@ services:
       WONTON_MATRIX_OWNER: ${WONTON_MATRIX_OWNER:?需要主人的 Matrix 用户 ID}
       WONTON_MATRIX_HOME_ROOM: ${WONTON_MATRIX_HOME_ROOM:?需要主人与 Bot 的主房间}
       WONTON_MCP_URL: ${WONTON_MCP_URL:?需要 MCP 总线地址}
+      # 首问冷启动可能几分钟（实测 4–10 分钟），桥默认 600 秒会先取消。
+      WONTON_ACP_TURN_SECONDS: "900"
     volumes:
       - ${WONTON_BOT_DATA}/bridge:/data/bridge
       - ${WONTON_BOT_DATA}/run:/data/run
