@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""网关钩子：apply 把网关地址、key 和模型写进 ~/.codebuddy/wonton-gateway.env（0600），
+ACP 启动壳加载后调 CLI；clear 只删这个文件，账号凭据和用户自己的 key 不碰。
+接了网关时网关文件后加载，覆盖用户 key。"""
+import os
+import shlex
+import sys
+from pathlib import Path
+
+PATH = Path(os.path.expanduser("~/.codebuddy/wonton-gateway.env"))
+ENV = {
+    "CODEBUDDY_BASE_URL": os.environ.get("WONTON_MODEL_BASE_URL", ""),
+    "CODEBUDDY_API_KEY": os.environ.get("WONTON_MODEL_API_KEY", ""),
+    "CODEBUDDY_MODEL": os.environ.get("WONTON_MODEL_DEFAULT", ""),
+}
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else ""
+    if action == "apply":
+        missing = [name for name in ENV.values() if not name]
+        if missing:
+            print("网关变量不全，不能 apply", file=sys.stderr)
+            return 1
+        PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PATH.with_name(PATH.name + ".tmp")
+        temporary.write_text("".join(f"{name}={shlex.quote(value)}\n" for name, value in ENV.items()))
+        temporary.chmod(0o600)
+        os.replace(temporary, PATH)
+        return 0
+    if action == "clear":
+        PATH.unlink(missing_ok=True)
+        return 0
+    print(f"用法：{sys.argv[0]} apply|clear", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
