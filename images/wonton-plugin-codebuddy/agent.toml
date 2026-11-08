@@ -1,0 +1,43 @@
+# CodeBuddy Code 闭源 CLI：首次启动从 npm 官方源下载，按版本和 dist.integrity 核对。
+[[install]]
+name = "codebuddy"
+version = "2.181.0"
+source = "npm"
+package = "@tencent-ai/codebuddy-code"
+integrity = "sha512-7PTMUsVcbP4ouTe9EsrqhFu4FS95GKo7VM18+d4gy2OsJokMzkx9Vwf3OVLBlZJ90NwQxrL2YFuJ8g68/lOe4g=="
+
+[skills]
+target = "~/.codebuddy/skills"
+
+[prompt]
+target = "~/.codebuddy/CODEBUDDY.md"
+
+[gateway]
+hook = "/usr/local/lib/wonton-agent/codebuddy-gateway"
+
+[acp]
+command = ["/usr/local/lib/wonton-agent/codebuddy-acp"]
+
+# 登录网页（App 的插件页）：列出下面的登录方式和状态。
+[web]
+port = 8080
+
+# 官方账号登录：登录只走 ACP authenticate，链接由脚本从 _codebuddy.ai/authUrl 通知里取出来。
+[[login]]
+id = "internal"
+name = "微信账号"
+command = ["/usr/local/lib/wonton-agent/codebuddy-acp-client", "login", "internal"]
+status = ["/usr/local/lib/wonton-agent/codebuddy-acp-client", "status"]
+
+[[login]]
+id = "external"
+name = "Google / GitHub 账号"
+command = ["/usr/local/lib/wonton-agent/codebuddy-acp-client", "login", "external"]
+status = ["/usr/local/lib/wonton-agent/codebuddy-acp-client", "status"]
+
+# 自己的 API key：读一行存进只有 Agent 读的环境文件，ACP 命令启动时加载。空行清除。
+[[login]]
+id = "api-key"
+name = "CodeBuddy API key"
+command = ["/usr/local/lib/wonton-agent/codebuddy-key-login"]
+status = ["/usr/local/lib/wonton-agent/codebuddy-key-login", "status"]

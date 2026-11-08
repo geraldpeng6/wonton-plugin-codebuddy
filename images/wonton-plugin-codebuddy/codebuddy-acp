@@ -1,0 +1,14 @@
+#!/bin/sh
+# [acp] 的启动壳：先加载用户自己的 key，再加载网关文件（同名变量覆盖，接了网关就用网关）。
+# 两个文件都在数据卷 HOME 下，0600；都不存在时直接用账号登录态。
+set -eu
+home="${HOME:-/data/agent/home}"
+for file in "$home/.codebuddy/wonton-user.env" "$home/.codebuddy/wonton-gateway.env"; do
+  if [ -f "$file" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$file"
+    set +a
+  fi
+done
+exec /data/agent/tools/codebuddy/2.181.0/bin/codebuddy --acp
