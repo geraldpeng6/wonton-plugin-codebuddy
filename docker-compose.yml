@@ -54,6 +54,7 @@ services:
       WONTON_MCP_URL: ${WONTON_MCP_URL:?需要 MCP 总线地址}
       # 首问冷启动可能几分钟（实测 4–10 分钟），桥默认 600 秒会先取消。
       WONTON_ACP_TURN_SECONDS: "900"
+      RUST_LOG: info,wonton_acp_bridge=debug
     volumes:
       - ${WONTON_BOT_DATA}/bridge:/data/bridge
       - ${WONTON_BOT_DATA}/run:/data/run
