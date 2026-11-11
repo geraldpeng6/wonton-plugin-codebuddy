@@ -71,10 +71,10 @@ x-wonton:
   id: ai.codebuddy
   version: 0.1.0
   kind: agent
-  title: { zh: CodeBuddy, en: CodeBuddy }
+  title: { zh: AI 编程助手（CodeBuddy）, en: Coding Bot (CodeBuddy) }
   description:
-    zh: 腾讯的 CodeBuddy 编程 Agent，在聊天里按你的确认动手
-    en: Tencent's CodeBuddy coding agent that acts in chat, asking before it acts
+    zh: 腾讯家的编程助手：在聊天里帮你写代码、改文件、跑命令，动手前先弹卡片问你。直接用模型设置就行，也能用微信、Google 或 GitHub 账号登录。
+    en: "Tencent's coding bot: it writes code, edits files and runs commands from your chat, asking with a card before it acts. Works with your Models setup, or sign in with WeChat, Google or GitHub."
   icon: icon.svg
   notices: [NOTICE, images/wonton-plugin-codebuddy/LICENSE.codebuddy]
   author: { name: Wonton plugin authors }
@@ -88,17 +88,17 @@ x-wonton:
     sso: none
   about:
     zh: |
-      CodeBuddy 以 Bot 的身份住进聊天：模型网关接好时默认走网关，不用账号，也不用填任何 key。
-      没接网关时，在插件页的登录网页（默认 Bot）或聊天里发 /wonton login（这个聊天对应的 Bot）：
-      用微信或 Google / GitHub 账号登录，或者贴一个自己的 CodeBuddy API key。它住在自己的容器里工作，
-      改文件、跑命令之前经确认卡片问你；Wonton 插件的工具也从聊天里调。
+      CodeBuddy 是腾讯的编程 AI，住进你的聊天里：改文件、跑命令之前先弹确认卡片问你；你装的应用提供的
+      工具也能在聊天里用。默认用模型设置里配好的 AI，不用账号、不用填 key；没配好时也能用自己的身份——
+      在应用页打开登录网页（管默认 Bot），或在聊天里发 /wonton login（管这个聊天的 Bot），用微信或
+      Google / GitHub 账号登录，或贴上自己的 CodeBuddy key。
     en: |
-      CodeBuddy lives in the chat as a bot: when the model gateway is connected it goes through the
-      gateway by default, with no account and no key to fill in. Without the gateway, use the login
-      page on the plugin screen (default bot) or send /wonton login in the chat (this chat's bot):
-      sign in with WeChat or Google / GitHub, or paste your own CodeBuddy API key. It works in its
-      own container and asks through confirmation cards before editing files or running commands;
-      Wonton plugin tools are called from the chat too.
+      CodeBuddy is Tencent's coding AI, living in your chat: it sends an approval request before
+      editing files or running commands, and the tools your apps provide work from the chat too.
+      By default it uses the AI set up in Models — no account, no key. You can also use your own
+      identity: open the sign-in page on the app screen (for the default bot) or send /wonton
+      login in the chat (for this chat's bot), then sign in with WeChat, Google or GitHub, or
+      paste your own CodeBuddy key.
   release_notes:
     zh: 首个版本：模型网关可选，没接网关时用微信 / Google / GitHub 账号或自己的 API key 登录；登录网页和 /wonton login 都从 ACP 取链接。
     en: >-
