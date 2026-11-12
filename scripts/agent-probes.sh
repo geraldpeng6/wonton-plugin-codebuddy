@@ -34,6 +34,8 @@
 : "${WONTON_SMOKE_CURL_IMAGE:=curlimages/curl:8.23.0}"
 AGENT_PHONE_STATE=""
 AGENT_OWNER_TOKEN=""
+AGENT_CARD_LOG=""
+AGENT_CARD_EMPTY=""
 
 # 用户的手机：tunnel-client 进核心的网络命名空间，和核心配对后在 127.0.0.1:18008 开带凭据的代理；
 # echo-bot probe 经它连 Matrix。只起一次，后面的子项共用。起不来时记一行 FAIL 加密私聊（配对坏了是真问题），
@@ -240,8 +242,11 @@ agent_check_mcp_chat() {
 # 选项带 choice_id 的（ACP 的权限卡）要把那个选项自己的 answer 和 choice_id 一起发回去。
 agent_card_answer() {
   local want="$1" needle="$2" seconds="${3:-${AGENT_CARD_WAIT:-120}}" max="${AGENT_CARD_MAX:-1800}"
-  local list id body owner room_url start now idle=0 tick=0 last_ts=0 ts
+  local list id body owner room_url start now idle=0 tick=0 last_ts=0 ts want_kind
+  AGENT_CARD_LOG=""
+  AGENT_CARD_EMPTY=""
   start="$(date +%s)"
+  [[ "$want" == reject ]] && want_kind=reject_once || want_kind=allow_once
   # Bot 还在发消息（后台积压没消化完）就一直等：限时按它安静多久算，不看墙上时钟；绝对上限兜底。
   owner="$(agent_owner_token)" || owner=""
   room_url="$(jq -rn --arg r "$AGENT_ROOM" '$r | @uri')"
@@ -250,15 +255,24 @@ agent_card_answer() {
     id="$(jq -r --arg n "$needle" '[.confirmations[]? | select(((.title // "") + " " + (.description // "") + " "
       + ((.arguments // {}) | tostring)) | contains($n)) | .id][0] // empty' <<<"$list")"
     if [[ -n "$id" ]]; then
-      body="$(jq -c --arg id "$id" --arg a "$want" '[.confirmations[] | select(.id == $id) | .choices[]?
-        | select(((.answer // .kind) // "") | startswith($a))][0] // {} | {answer: (.answer // $a)}
-        + (if .choice_id then {choice_id} else {} end)' <<<"$list")"
-      echo "卡片 $id（$(jq -r --arg i "$id" '[.confirmations[] | select(.id == $i) | .title][0] // ""' <<<"$list")）：回答 $body"
+      # 优先“这一次”的选项：第一项常是“总是允许”，一直点会让后面的用例不再出卡片。
+      body="$(jq -c --arg id "$id" --arg a "$want" --arg k "$want_kind"         '([.confirmations[] | select(.id == $id) | .choices[]? | select(.kind == $k)][0]
+          // [.confirmations[] | select(.id == $id) | .choices[]?
+            | select(((.answer // .kind) // "") | startswith($a))][0] // {})
+        | {answer: (.answer // $a)} + (if .choice_id then {choice_id} else {} end)' <<<"$list")"
+      AGENT_CARD_LOG="$id（$(jq -r --arg i "$id" '[.confirmations[] | select(.id == $i) | .title][0] // ""' <<<"$list")）：$body"
+      echo "卡片 $AGENT_CARD_LOG"
       smoke_api POST "/_wonton/confirmations/$id" -H 'Content-Type: application/json' -d "$body"
       return
     fi
     now="$(date +%s)"
-    ((now - start < max)) || return 1
+    if ((now - start >= max)); then
+      list="$(smoke_api GET /_wonton/api/confirmations 2>/dev/null)" || list='{}'
+      AGENT_CARD_EMPTY="$(jq -r 'if (.confirmations // []) | length > 0 then 0 else 1 end' <<<"$list")"
+      AGENT_CARD_LOG="等到 ${max} 秒，还挂着：$(jq -r '[.confirmations[]? | "\(.id[:8] // "") \(.title // "")"] | join("；")' <<<"$list")"
+      echo "等卡片超时：$AGENT_CARD_LOG"
+      return 1
+    fi
     if [[ -n "$owner" ]] && ((tick % 2 == 0)); then
       ts="$(agent_last_bot_ts "$owner" "$room_url")"
       if [[ -n "$ts" ]] && ((ts > last_ts)); then
@@ -269,7 +283,13 @@ agent_card_answer() {
     tick=$((tick + 1))
     sleep 1
     idle=$((idle + 1))
-    ((idle <= seconds)) || return 1
+    if ((idle > seconds)); then
+      list="$(smoke_api GET /_wonton/api/confirmations 2>/dev/null)" || list='{}'
+      AGENT_CARD_EMPTY="$(jq -r 'if (.confirmations // []) | length > 0 then 0 else 1 end' <<<"$list")"
+      AGENT_CARD_LOG="Bot 安静超过 ${seconds} 秒，还挂着：$(jq -r '[.confirmations[]? | "\(.id[:8] // "") \(.title // "")"] | join("；")' <<<"$list")"
+      echo "等卡片超时：$AGENT_CARD_LOG"
+      return 1
+    fi
   done
 }
 
@@ -289,7 +309,9 @@ agent_card_take() {
   # 只取有选项的卡片：提问类卡片没有选项，用 approve 答不了，会一直挂在列表里。
   id="$(jq -r '[.confirmations[]? | select(((.choices // []) | length) > 0) | .id][0] // empty' <<<"$list")"
   [[ -n "$id" ]] || return 1
-  body="$(jq -c --arg id "$id" '[.confirmations[] | select(.id == $id) | .choices[]?][0] // {}
+  # 优先“这一次”：第一项常是“总是允许”，一直点会让后面的用例不再出卡片。
+  body="$(jq -c --arg id "$id" '[.confirmations[] | select(.id == $id)][0] as $c
+    | ([$c.choices[]? | select(.kind == "allow_once")][0] // [$c.choices[]?][0] // {})
     | {answer: (.answer // "approve")} + (if .choice_id then {choice_id} else {} end)' <<<"$list")"
   echo "等上一轮结束时同意一张卡片 $id：$body"
   if ! out="$(smoke_api POST "/_wonton/confirmations/$id" -H 'Content-Type: application/json' -d "$body" 2>&1)"; then
@@ -381,20 +403,22 @@ agent_wait_idle() { # <子项>
   echo "上一轮结束了：最后一条 Bot 消息 ${age} 秒前，活动的模型请求/工具/卡片 ${activity:-读不到}$( ((approved)) && echo "，等的时候同意了 $approved 张卡片" )"
 }
 
-# 确认卡片：同意一次（命令跑了），拒绝一次（命令没跑）。不给参数时让 Agent 用 shell 跑 echo，看聊天里的输出
+# 确认卡片：同意一次（命令跑了），拒绝一次（命令没跑）。拒绝那一问没出卡、待答列表为空、而同意那一问刚跑过时，
+# 当成“CLI 没再询问”，这一问记 N/A（不算失败）；出了卡仍严格验。不给参数时让 Agent 用 shell 跑 echo，看聊天里的输出
 # 和回答。[服务]：这家 Agent 只在写工作区时才问（只读命令不出卡片，如 Codex 的 read-only、Claude Code 的 default），
 # 改成让它在 /workspace 里 touch 一个文件，以那个服务容器里文件在不在为准：模型有时不等执行结果就先回话，
 # 拒绝后这一轮也可能直接结束、聊天里没有回答。
 agent_check_card() {
-  local file bg svc="${1:-}" container ask_ok ask_no
+  local file bg svc="${1:-}" container ask_ok ask_no granted=0
   agent_need 确认卡片 model || return 0
   agent_wait_idle 确认卡片 || return 0
   if [[ -n "$svc" ]]; then
     container="$(running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--$svc")" ||
       { extra_item FAIL 确认卡片 "找不到服务 $svc 在跑的容器"; return 0; }
-    docker exec "$container" rm -f /workspace/card-ok /workspace/card-no >/dev/null 2>&1 || true
+    docker exec "$container" rm -rf /workspace/card-ok /workspace/card-no >/dev/null 2>&1 || true
     ask_ok='用 touch 在 /workspace 里创建文件 card-ok，然后只回答：建好了。'
-    ask_no='用 touch 在 /workspace 里创建文件 card-no，然后只回答：建好了。'
+    # 换一种命令再问：有的 Agent 记住刚允许过的命令形状，同一个 touch 第二次不再出卡片。
+    ask_no='用 mkdir 在 /workspace 里创建目录 card-no，然后只回答：建好了。'
   else
     ask_ok='用 shell 跑一条命令：echo card-ok，然后只说命令输出。'
     ask_no='再用 shell 跑一条命令：echo card-no，然后只说结果。'
@@ -407,12 +431,13 @@ agent_check_card() {
     wait "$bg"
     if agent_card_ran "$container" card-ok "$file"; then
       extra_item PASS 确认卡片 "跑命令前出了确认卡片，同意后命令跑了${svc:+（$svc 里有 card-ok）}"
+      granted=1
     else
-      extra_item FAIL 确认卡片 "同意了卡片，等不到命令跑完：$(agent_tail "$(cat "$file")")"
+      extra_item FAIL 确认卡片 "同意了卡片，等不到命令跑完：$(agent_tail "$AGENT_CARD_LOG" 200)｜$(agent_tail "$(cat "$file")")"
     fi
   else
     kill "$bg" 2>/dev/null; wait "$bg"
-    extra_item FAIL 确认卡片 "让 Agent 跑命令，等不到确认卡片：$(agent_tail "$(cat "$file")")"
+    extra_item FAIL 确认卡片 "让 Agent 跑命令，等不到确认卡片：$(agent_tail "$AGENT_CARD_LOG" 200)｜$(agent_tail "$(cat "$file")")"
   fi
   cat "$file"
   # 第二问同样等上一问真的结束：不等时后台还在跑，提示被回一句状态就压到积压里，第二张卡片错过窗口。
@@ -434,22 +459,26 @@ agent_check_card() {
     else
       extra_item PASS 确认卡片 "拒绝卡片后命令没跑，Agent 如实说了"
     fi
+  elif ((granted)) && [[ "$AGENT_CARD_EMPTY" == 1 ]]; then
+    # 本会话刚对同形状命令放行过、待答列表也是空的：CLI 干脆没再问，这一问验不到。
+    kill "$bg" 2>/dev/null; wait "$bg"
+    extra_item N/A 确认卡片 "同意那一问已跑过，CLI 没再询问第二问（待答列表为空），拒绝这一问没验到：$(agent_tail "$AGENT_CARD_LOG" 200)"
   else
     kill "$bg" 2>/dev/null; wait "$bg"
-    extra_item FAIL 确认卡片 "第二次跑命令等不到确认卡片：$(agent_tail "$(cat "$file")")"
+    extra_item FAIL 确认卡片 "第二次跑命令等不到确认卡片：$(agent_tail "$AGENT_CARD_LOG" 200)｜$(agent_tail "$(cat "$file")")"
   fi
   cat "$file"
   rm -f "$file"
-  [[ -z "$svc" ]] || docker exec "$container" rm -f /workspace/card-ok >/dev/null 2>&1 || true
+  [[ -z "$svc" ]] || docker exec "$container" rm -rf /workspace/card-ok >/dev/null 2>&1 || true
 }
 
-# 同意之后命令跑了没有：<容器>（空 = 看聊天）<文件名> <聊天记录>。看容器时等 20 秒文件出现。
+# 同意之后命令跑了没有：<容器>（空 = 看聊天）<文件名> <聊天记录>。看容器时最多等 AGENT_RUN_WAIT 秒（默认 60）文件出现。
 agent_card_ran() {
   if [[ -z "$1" ]]; then
     grep -q "$2" "$3"
     return
   fi
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 "${AGENT_RUN_WAIT:-60}"); do
     docker exec "$1" test -e "/workspace/$2" 2>/dev/null && return 0
     sleep 1
   done
