@@ -11,34 +11,18 @@ AGENT_WAIT=860
 AGENT_CARD_WAIT=480
 AGENT_HEALTHY_WAIT=360
 
-# CodeBuddy 收到提示先回一句状态（在想、在写回复、在忙别的、等你确认）就把这轮结束，真正干活在后台，
-# 回答晚几分钟才到。前一项没安静就发下一项，提示在它内部排队，后面各项的卡片窗口全错过（11-12 冒烟里
-# MCP 卡片、确认卡片、打断五项失败全是这个节奏）。等 Bot 安静 <秒数>（默认 90，它的两条状态能隔几分钟）
-# 再进下一项，最多等 600 秒；等不到就照常接着测，不把套件拖死。
-agent_quiet() {
-  local wait="${1:-90}" room_url token last now quiet=0
-  room_url="$(jq -rn --arg r "$AGENT_ROOM" '$r | @uri')"
-  # shellcheck disable=SC2153 # SMOKE_CORE 是套件在运行时给的
-  token="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/matrix-admin-token")"
-  for _ in $(seq 1 120); do
-    last="$(agent_matrix "$token" GET "/_matrix/client/v3/rooms/$room_url/messages?dir=b&limit=20" 2>/dev/null |
-      jq --arg b "$AGENT_BOT" '[.chunk[]? | select(.sender == $b) | .origin_server_ts // 0] | max // 0')"
-    now="$(($(date +%s) * 1000))"
-    if ((now - last > wait * 1000)); then quiet=1; break; fi
-    sleep 5
-  done
-  ((quiet)) || echo "Bot 一直没安静下来，照常接着测"
-}
+# CodeBuddy 收到提示先回一句状态（在想、在写回复、在忙别的）就把这轮结束，真正干活在后台，回答晚几分钟才到。
+# 套件的探针在要卡片的用例前自己等上一轮结束：核心记的模型请求/工具调用/卡片都清零、安静 AGENT_IDLE_QUIET 秒
+# 才发下一条提示（最长 AGENT_IDLE_WAIT 秒）。它的两条状态能隔几分钟，安静门限放宽到 60 秒。
+AGENT_IDLE_QUIET=60
+AGENT_IDLE_WAIT=900
 
 extra_check() {
   agent_check_chat '请用一句话回答：codebuddy 冒烟。记住暗号：青杏。'
   agent_check_model
-  agent_quiet 90
   agent_check_mcp_chat card
   agent_check_mcp_bus
-  agent_quiet 90
   agent_check_card agent
-  agent_quiet 90
   agent_check_interrupt
   agent_check_restart agent bridge
   agent_check_resume 青杏

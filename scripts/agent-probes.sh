@@ -24,9 +24,16 @@
 # 等模型回答默认 240 秒，慢的 Agent 在探针里设 AGENT_WAIT（秒）。
 # 等确认卡片默认 120 秒，卡片出得慢的 Agent 在探针里设 AGENT_CARD_WAIT（秒）；要模型先想才出卡的给到 300 以上。
 # 只要 Bot 回了话就算数的（加密私聊、名单外不应答）不要模型：没有模型时 Bot 回的报错也是一条加密回复。
+#
+# 有的 Agent 收到提示先回一句状态就把这一轮结束，真活在后台接着跑（后台积压时回“在忙别的”）：要卡片的子项
+# （MCP 工具、确认卡片、打断）开始前先等上一轮真的结束，不然提示叠在积压上，卡片窗口全错过。判据只用能观测到
+# 的信号：核心的 Bot 活动接口（在跑的模型请求、工具调用、待答卡片）连续为零，而且 AGENT_IDLE_QUIET 秒（默认
+# 45）内既没有新的活动也没有 Bot 的新消息。等不到时最多 AGENT_IDLE_WAIT 秒（默认 900），到时这一项记 FAIL
+# “上一轮没结束”并跳过；等的时候冒出确认卡片就先同意，不让旧活堵着。
 
 : "${WONTON_SMOKE_CURL_IMAGE:=curlimages/curl:8.23.0}"
 AGENT_PHONE_STATE=""
+AGENT_OWNER_TOKEN=""
 
 # 用户的手机：tunnel-client 进核心的网络命名空间，和核心配对后在 127.0.0.1:18008 开带凭据的代理；
 # echo-bot probe 经它连 Matrix。只起一次，后面的子项共用。起不来时记一行 FAIL 加密私聊（配对坏了是真问题），
@@ -111,6 +118,52 @@ agent_need() {
 
 agent_tmp() { mktemp "${SMOKE_STATE%/*}/agent.XXXXXX"; }
 
+# 诊断辅助：名单外窗口出现 Bot 消息时把现场抓全，误报时不用重跑——原始房间事件（加密事件没有正文，
+# 但 sender/ts/type/relations 齐）、桥和 agent 容器日志、AO 会话列表、核心注入给桥的名单。
+agent_outsider_hit_dump() { # <owner_token> <room_url> <since 毫秒> <outsider 用户 ID>
+  local ot="$1" room_url="$2" since="$3" outsider="$4" outdir ts c
+  ts="$(date +%H%M%S)"
+  outdir="${AO_DBG_DIR:-${SMOKE_STATE%/*}}/outsider-hit-$ts"
+  mkdir -p "$outdir"
+  echo "== 诊断：名单外窗口出现 Bot 消息（since=$since outsider=$outsider），现场在 $outdir"
+  agent_matrix "$ot" GET "/_matrix/client/v3/rooms/$room_url/messages?dir=b&limit=100" \
+    >"$outdir/room-events.json" 2>&1 || true
+  jq -c '.chunk[]? | {ts: .origin_server_ts, sender, type, event_id, content, relates: (.content["m.relates_to"] // empty)}' \
+    "$outdir/room-events.json" 2>/dev/null | head -40 | sed 's/^/事件 /' || true
+  c="$(running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--bridge")"
+  if [[ -n "$c" ]]; then
+    docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' |
+      grep -E "WONTON_MATRIX_(ALLOWED_USERS|HOME_ROOM|USER_ID|HOMESERVER)" | sed 's/^/桥env /'
+    docker logs --tail 500 --timestamps "$c" >"$outdir/bridge.log" 2>&1 || true
+    echo "== 桥日志尾部 50 行 =="; tail -50 "$outdir/bridge.log"
+  fi
+  c="$(running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--agent")"
+  if [[ -n "$c" ]]; then
+    docker logs --tail 500 --timestamps "$c" >"$outdir/agent.log" 2>&1 || true
+    echo "== agent 日志尾部 50 行 =="; tail -50 "$outdir/agent.log"
+    docker exec "$c" curl -sS --noproxy '*' --max-time 10 http://127.0.0.1:3001/api/v1/orchestrators \
+      >"$outdir/ao-sessions.json" 2>&1 || true
+    echo "== AO 会话列表 =="; head -c 4000 "$outdir/ao-sessions.json"; echo
+    # 每个会话的最近对话：outsider 文本到没到 Agent，看转录里有没有它。
+    jq -r '.sessions[]?.id // empty' "$outdir/ao-sessions.json" 2>/dev/null | sort -u | head -8 |
+      while IFS= read -r sid; do
+        [[ -n "$sid" ]] || continue
+        docker exec "$c" curl -sS --noproxy '*' --max-time 15 \
+          "http://127.0.0.1:3001/api/v1/sessions/$sid/conversation?limit=50" \
+          >"$outdir/ao-conv-$sid.json" 2>&1 || true
+      done
+    echo "== AO 转录关键词扫描（outsider/请用一句话/同一个房间/诊断） =="
+    grep -l . "$outdir"/ao-conv-*.json 2>/dev/null | while IFS= read -r f; do
+      grep -o -E "outsider smoke[^\"]{0,80}|请用一句话[^\"]{0,60}|同一个房间[^\"]{0,60}|诊断：[^\"]{0,60}" "$f" |
+        sed "s|^|$(basename "$f") |" | head -6
+    done
+  fi
+  if [[ -n "${WONTON_DEV_MODEL_BASE_URL:-}" ]]; then
+    echo "== 诊断：让 Agent 复述最近收到的用户消息 =="
+    agent_say --reply any --settle 8 --wait 150 --text '诊断：请逐字复述你最近一次收到的用户消息的原文，只输出原文，不要解释。' 2>&1 | tail -15
+  fi
+}
+
 # 一行摘要：日志里留全文，结果行里只放末尾一段。
 agent_tail() { tail -c "${2:-200}" <<<"$1" | tr '\n' ' '; }
 
@@ -157,13 +210,15 @@ agent_check_mcp_bus() {
 agent_check_mcp_chat() {
   local file bg rc=0
   agent_need MCP工具 model || return 0
+  agent_wait_idle MCP工具 || return 0
   file="$(agent_tmp)"
   agent_say --reply any --settle 10 --wait "${AGENT_WAIT:-240}" \
     --text '用 wonton__list_plugins 列出已装的插件，输出每项的 id（形如 xxx.yyy.zzz），一个一行，不要解释。' >"$file" 2>&1 &
   bg=$!
   if [[ "${1:-}" == card ]]; then
-    if agent_card_answer approve list_plugins >&2; then
-      agent_cards_until "$bg" approve list_plugins >/dev/null
+    # 卡片标题不一定带工具名，按任意一张卡等（前面的积压已由等待门消化掉）。
+    if agent_card_answer approve '' >&2; then
+      agent_cards_until "$bg" approve '' >/dev/null
       extra_item PASS MCP工具 "Agent 调 MCP 工具前出了确认卡片，同意了"
     else
       extra_item FAIL MCP工具 "Agent 调 MCP 工具前等不到确认卡片"
@@ -179,11 +234,18 @@ agent_check_mcp_chat() {
   rm -f "$file"
 }
 
-# 等一张标题、说明或参数里含 <文字> 的确认卡片，按 <approve|reject> 回答，最多等 [秒数]（默认 AGENT_CARD_WAIT 或 120 秒）；卡片没出现返回 1。
+# 等一张标题、说明或参数里含 <文字>（空 = 任意一张）的确认卡片，按 <approve|reject> 回答；卡片没出现返回 1。
+# [秒数]（默认 AGENT_CARD_WAIT 或 120）是 Bot 安静多久才放弃：它还在发消息就一直等，另受 AGENT_CARD_MAX（默认
+# 1800 秒）的绝对上限兜底。后台积压几分钟才轮到的 Agent 靠这个不丢卡片窗口。
 # 选项带 choice_id 的（ACP 的权限卡）要把那个选项自己的 answer 和 choice_id 一起发回去。
 agent_card_answer() {
-  local want="$1" needle="$2" list id body
-  for _ in $(seq 1 "${3:-${AGENT_CARD_WAIT:-120}}"); do
+  local want="$1" needle="$2" seconds="${3:-${AGENT_CARD_WAIT:-120}}" max="${AGENT_CARD_MAX:-1800}"
+  local list id body owner room_url start now idle=0 tick=0 last_ts=0 ts
+  start="$(date +%s)"
+  # Bot 还在发消息（后台积压没消化完）就一直等：限时按它安静多久算，不看墙上时钟；绝对上限兜底。
+  owner="$(agent_owner_token)" || owner=""
+  room_url="$(jq -rn --arg r "$AGENT_ROOM" '$r | @uri')"
+  while :; do
     list="$(smoke_api GET /_wonton/api/confirmations 2>/dev/null)" || list='{}'
     id="$(jq -r --arg n "$needle" '[.confirmations[]? | select(((.title // "") + " " + (.description // "") + " "
       + ((.arguments // {}) | tostring)) | contains($n)) | .id][0] // empty' <<<"$list")"
@@ -191,13 +253,24 @@ agent_card_answer() {
       body="$(jq -c --arg id "$id" --arg a "$want" '[.confirmations[] | select(.id == $id) | .choices[]?
         | select(((.answer // .kind) // "") | startswith($a))][0] // {} | {answer: (.answer // $a)}
         + (if .choice_id then {choice_id} else {} end)' <<<"$list")"
-      echo "卡片 $id：回答 $body"
+      echo "卡片 $id（$(jq -r --arg i "$id" '[.confirmations[] | select(.id == $i) | .title][0] // ""' <<<"$list")）：回答 $body"
       smoke_api POST "/_wonton/confirmations/$id" -H 'Content-Type: application/json' -d "$body"
       return
     fi
+    now="$(date +%s)"
+    ((now - start < max)) || return 1
+    if [[ -n "$owner" ]] && ((tick % 2 == 0)); then
+      ts="$(agent_last_bot_ts "$owner" "$room_url")"
+      if [[ -n "$ts" ]] && ((ts > last_ts)); then
+        last_ts="$ts"
+        idle=0
+      fi
+    fi
+    tick=$((tick + 1))
     sleep 1
+    idle=$((idle + 1))
+    ((idle <= seconds)) || return 1
   done
-  return 1
 }
 
 # <进程> 还在跑时一直按 <approve|reject> 回答含 <文字> 的卡片（有的 Agent 一个动作弹好几张）。输出回答了几张。
@@ -209,6 +282,105 @@ agent_cards_until() { # <进程> <approve|reject> <文字>
   echo "$n"
 }
 
+# 等的时候把冒出来的卡片先同意掉：取第一张，按它的第一个选项（通常是推荐项）回答。没有卡片时返回 1。
+agent_card_take() {
+  local list id body out
+  list="$(smoke_api GET /_wonton/api/confirmations 2>/dev/null)" || return 1
+  # 只取有选项的卡片：提问类卡片没有选项，用 approve 答不了，会一直挂在列表里。
+  id="$(jq -r '[.confirmations[]? | select(((.choices // []) | length) > 0) | .id][0] // empty' <<<"$list")"
+  [[ -n "$id" ]] || return 1
+  body="$(jq -c --arg id "$id" '[.confirmations[] | select(.id == $id) | .choices[]?][0] // {}
+    | {answer: (.answer // "approve")} + (if .choice_id then {choice_id} else {} end)' <<<"$list")"
+  echo "等上一轮结束时同意一张卡片 $id：$body"
+  if ! out="$(smoke_api POST "/_wonton/confirmations/$id" -H 'Content-Type: application/json' -d "$body" 2>&1)"; then
+    echo "卡片 $id 没答成：$(agent_tail "$out")"
+    return 1
+  fi
+  echo "卡片 $id 答完"
+}
+
+agent_owner_token() {
+  local admin owner
+  [[ -z "$AGENT_OWNER_TOKEN" ]] || { printf '%s' "$AGENT_OWNER_TOKEN"; return; }
+  admin="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/matrix-admin-token")" || return 1
+  owner="@$SMOKE_OWNER:${AGENT_BOT#*:}"
+  AGENT_OWNER_TOKEN="$(agent_matrix "$admin" POST \
+    "/_synapse/admin/v1/users/$(jq -rn --arg u "$owner" '$u | @uri')/login" '{}' | jq -r '.access_token // empty')"
+  [[ -n "$AGENT_OWNER_TOKEN" ]] || return 1
+  printf '%s' "$AGENT_OWNER_TOKEN"
+}
+
+# 核心记着的这个 Bot 的活动：<在跑的模型请求> <在跑的工具调用> <在等的确认卡片>；接口读不到返回 1。
+agent_activity() {
+  local snapshot bot
+  # shellcheck disable=SC2153 # SMOKE_CORE 是套件在运行时给的
+  snapshot="$(docker run --rm --network "container:$AGENT_PHONE" "$WONTON_SMOKE_CURL_IMAGE" -sS --noproxy '' \
+    --max-time 20 -x http://127.0.0.1:18008 -U "$AGENT_CREDENTIAL" -H "Authorization: Bearer $SMOKE_TOKEN" \
+    "http://$AGENT_HOST:$AGENT_PORT/_wonton/api/bots/activity" 2>/dev/null)" || return 1
+  bot="$(jq -c --arg p "$SMOKE_PLUGIN_ID" --arg u "$AGENT_BOT" \
+    '[.bots[]? | select(.plugin_id == $p or .user_id == $u)][0] // empty' <<<"$snapshot")" || return 1
+  [[ -n "$bot" ]] || return 1
+  jq -r '"\(.model_requests // 0) \(.tool_calls // 0) \(.waiting // 0)"' <<<"$bot"
+}
+
+# Bot 在这个房间里最新一条事件的毫秒时间戳，没有时 0。
+agent_last_bot_ts() { # <主人令牌> <房间路径>
+  agent_matrix "$1" GET "/_matrix/client/v3/rooms/$2/messages?dir=b&limit=20" 2>/dev/null |
+    jq --arg b "$AGENT_BOT" '[.chunk[]? | select(.sender == $b) | .origin_server_ts // 0] | max // 0'
+}
+
+# 等 Bot 上一轮真的结束再发下一条提示：核心的活动计数连续为零，而且 AGENT_IDLE_QUIET 秒内没有新的活动和
+# Bot 的新消息（两者一起要求，活动接口或房间事件有一个读不到时用另一个）。最多等 AGENT_IDLE_WAIT 秒，超时记
+# FAIL <子项>「上一轮没结束」并返回 1，调用方跳过这个用例。等的时候出现的确认卡片先同意掉。
+agent_wait_idle() { # <子项>
+  local item="$1" quiet="${AGENT_IDLE_QUIET:-45}" limit="${AGENT_IDLE_WAIT:-900}" tick="${AGENT_IDLE_TICK:-5}"
+  local owner room_url start now activity last age=0 idle_since="" steady said=0 approved=0
+  start="$(date +%s)"
+  room_url="$(jq -rn --arg r "$AGENT_ROOM" '$r | @uri')"
+  owner="$(agent_owner_token)" || owner=""
+  if [[ -z "$owner" ]] && ! agent_activity >/dev/null; then
+    echo "等上一轮结束：活动接口和房间事件都读不到，只等 $quiet 秒"
+    sleep "$quiet"
+    return 0
+  fi
+  # 有房间事件时“没有新消息”已经是安静时长的判据，再看两拍确认；只有活动计数时才要连续安静这么久。
+  steady="$quiet"
+  [[ -z "$owner" ]] || steady=10
+  while :; do
+    now="$(date +%s)"
+    if ((now - start >= limit)); then
+      extra_item FAIL "$item" "上一轮没结束：等了 ${limit} 秒，最后一条 Bot 消息 ${age} 秒前，活动的模型请求/工具/卡片 ${activity:-读不到}"
+      return 1
+    fi
+    activity="$(agent_activity)" || activity=""
+    # 空闲 = 房间安静够久（值得不到时为不算）且核心记的活动全为零（接口读不到时看作零）。
+    if [[ -n "$owner" ]]; then
+      last="$(agent_last_bot_ts "$owner" "$room_url")"
+      if [[ -n "$last" ]]; then
+        # 还没发过言时从这次等待算起；两台机器的时钟差把时间戳算成未来时按 0 算。
+        age=$(( last > 0 ? now - last / 1000 : now - start ))
+        ((age >= 0)) || age=0
+        ((age >= quiet)) || idle_since=""
+      fi
+      # 这次读不到房间事件时这拍判不了消息安静，保留上一拍的结果，不重置也不再放宽。
+    fi
+    [[ -z "$activity" || "$activity" == "0 0 0" ]] || idle_since=""
+    if [[ -n "$activity" && "${activity##* }" != 0 ]]; then
+      # 上一项落下的卡片：先同意掉，不然一直算在忙。
+      agent_card_take && approved=$((approved + 1))
+      idle_since=""
+    fi
+    [[ -n "$idle_since" ]] || idle_since="$now"
+    if ((now - idle_since >= steady)); then break; fi
+    if ((now - start >= said + 30)); then
+      said="$now"
+      echo "等上一轮结束：最后一条 Bot 消息 ${age} 秒前，活动的模型请求/工具/卡片 ${activity:-读不到}"
+    fi
+    sleep "$tick"
+  done
+  echo "上一轮结束了：最后一条 Bot 消息 ${age} 秒前，活动的模型请求/工具/卡片 ${activity:-读不到}$( ((approved)) && echo "，等的时候同意了 $approved 张卡片" )"
+}
+
 # 确认卡片：同意一次（命令跑了），拒绝一次（命令没跑）。不给参数时让 Agent 用 shell 跑 echo，看聊天里的输出
 # 和回答。[服务]：这家 Agent 只在写工作区时才问（只读命令不出卡片，如 Codex 的 read-only、Claude Code 的 default），
 # 改成让它在 /workspace 里 touch 一个文件，以那个服务容器里文件在不在为准：模型有时不等执行结果就先回话，
@@ -216,6 +388,7 @@ agent_cards_until() { # <进程> <approve|reject> <文字>
 agent_check_card() {
   local file bg svc="${1:-}" container ask_ok ask_no
   agent_need 确认卡片 model || return 0
+  agent_wait_idle 确认卡片 || return 0
   if [[ -n "$svc" ]]; then
     container="$(running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--$svc")" ||
       { extra_item FAIL 确认卡片 "找不到服务 $svc 在跑的容器"; return 0; }
@@ -229,8 +402,8 @@ agent_check_card() {
   file="$(agent_tmp)"
   agent_say --reply any --wait "${AGENT_WAIT:-240}" --text "$ask_ok" >"$file" 2>&1 &
   bg=$!
-  if agent_card_answer approve card-ok >&2; then
-    agent_cards_until "$bg" approve card-ok >/dev/null
+  if agent_card_answer approve '' >&2; then
+    agent_cards_until "$bg" approve '' >/dev/null
     wait "$bg"
     if agent_card_ran "$container" card-ok "$file"; then
       extra_item PASS 确认卡片 "跑命令前出了确认卡片，同意后命令跑了${svc:+（$svc 里有 card-ok）}"
@@ -242,10 +415,12 @@ agent_check_card() {
     extra_item FAIL 确认卡片 "让 Agent 跑命令，等不到确认卡片：$(agent_tail "$(cat "$file")")"
   fi
   cat "$file"
+  # 第二问同样等上一问真的结束：不等时后台还在跑，提示被回一句状态就压到积压里，第二张卡片错过窗口。
+  agent_wait_idle 确认卡片 || return 0
   agent_say --reply any --wait "$([[ -n "$svc" ]] && echo 30 || echo 240)" --text "$ask_no" >"$file" 2>&1 &
   bg=$!
-  if agent_card_answer reject card-no >&2; then
-    agent_cards_until "$bg" reject card-no >/dev/null
+  if agent_card_answer reject '' >&2; then
+    agent_cards_until "$bg" reject '' >/dev/null
     wait "$bg"
     sleep 5
     if [[ -n "$svc" ]]; then
@@ -281,24 +456,26 @@ agent_card_ran() {
   return 1
 }
 
-# 打断：先交一个要跑很久的活，再从另一台设备发 /wonton interrupt，新的一轮要能回答。
+# 打断：先交一个要跑很久的活，再从另一台设备发 /wonton interrupt：被打断的这一轮收尾后，新的一轮要有回答，
+# 而且回答承认被打断（各家说法不同，见到打断/取消/停下的说法就算，免得只认一句固定话）。
 agent_check_interrupt() {
   local file bg out rc=0
   agent_need 打断 model || return 0
+  agent_wait_idle 打断 || return 0
   file="$(agent_tmp)"
   agent_say --reply any --wait "${AGENT_WAIT:-240}" --text '先用 shell 跑 sleep 45，跑完只回答一句：数完了。' >"$file" 2>&1 &
   bg=$!
   # 跑 sleep 也要确认的 Agent 会先弹卡片：4 秒内出了就同意（让它真的跑起来再打断），没出就再等 4 秒。
   agent_card_answer approve sleep 4 >&2 || sleep 4
-  out="$(agent_say --reply any --wait 180 --settle 20 --text '/wonton interrupt 只回答一句：打断好了。' 2>&1)" || rc=$?
+  out="$(agent_say --reply any --wait 180 --settle 30 --text '/wonton interrupt 只回答一句：打断好了。' 2>&1)" || rc=$?
   wait "$bg"
   cat "$file"
   rm -f "$file"
   printf '%s\n' "$out"
-  if ((rc == 0)) && grep -q '打断好了' <<<"$out"; then
-    extra_item PASS 打断 "/wonton interrupt 停下手上的活，新的一轮回答了"
+  if ((rc == 0)) && grep -Eq '打断|中断|停了|停下|取消|停止|cancel|interrupt|stopped' <<<"$out"; then
+    extra_item PASS 打断 "/wonton interrupt 停下手上的活，新的一轮的回答承认被打断"
   else
-    extra_item FAIL 打断 "打断后没等到新一轮的回答：$(agent_tail "$out")"
+    extra_item FAIL 打断 "打断后新一轮的回答没承认被打断：$(agent_tail "$out")"
   fi
 }
 
@@ -422,14 +599,24 @@ agent_matrix() {
 # 名单外不应答：Bot 只听名单里的人。名单外的临时用户在主房间里发一条，<等待秒>（默认 30）内 Bot 不许回；模型慢、
 # 上一轮还没说完的 Agent 给长一点；踢掉他以后用户在
 # 同一个房间发一条，Bot 必须回：说明 Bot 在收这个房间的消息，前一条是看到了不答，不是没在跑。
-# [silent]：只断言名单外的人得不到回答，不做踢人后的对照（有的桥在有人进出房间后换 Megolm 会话，之后新登录的
-# 探针设备解不开回话；“Bot 在听且会回用户”由别的子项承担）。
+# 开窗前先用主人的一台新设备打一个往返（ping），确认没有轮次还在跑：桥对被打断的轮次会发超时通知，
+# 那是不针对谁的插话，上一轮还在跑时会被算到外人头上。往返没回答时预检不过，这一项记 N/A。
+# [silent]：只断言名单外的人得不到回答，不做踢人后的对照（“Bot 在听且会回用户”由别的子项承担）。
 # 临时用户用 Matrix 服务器的注册共享密钥建；邀请、踢人、读消息用用户本人的身份（管理接口代登录，用完退出），
 # 不碰 Bot 的令牌。
 agent_check_outsider() { # [silent] [等多少秒，默认 30]
   local admin owner owner_token secret nonce pass name mac reg outsider outsider_token room_url since seen out rc=0 expect
   local wait="${2:-30}"
   agent_need 名单外不应答 || return 0
+  # 桥的轮次超时通知（单轮 10 分钟）不针对谁：上一轮还在跑时，它的超时通知会落进下面的无声窗口，被算成
+  # “Bot 回了外人”。先打一个往返：Bot 回了话就说明在跑的轮次已经结束（桥按轮次排队，回话前不会再开新的
+  # 未完成轮次），再开窗。往返没回答说明可能有轮次还在跑，窗口判定不可信，这一项记 N/A。
+  if out="$(agent_say --reply any --settle 5 --wait "${AGENT_WAIT:-120}" --text '冒烟：请只回答 ping，不要调用工具。' 2>&1)"; then
+    sleep 10
+  else
+    extra_item N/A 名单外不应答 "预检往返没回答，可能有轮次还在跑，窗口判定不可信：$(agent_tail "$out")"
+    return 0
+  fi
   admin="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/matrix-admin-token")" ||
     { extra_item FAIL 名单外不应答 "读不到核心的 Matrix 管理令牌"; return 0; }
   owner="@$SMOKE_OWNER:${AGENT_BOT#*:}"
@@ -465,6 +652,9 @@ agent_check_outsider() { # [silent] [等多少秒，默认 30]
   seen="$(agent_matrix "$owner_token" GET "/_matrix/client/v3/rooms/$room_url/messages?dir=b&limit=100" |
     jq --arg b "$AGENT_BOT" --argjson t "$since" '[.chunk[]? | select(.sender == $b and (.origin_server_ts // 0) >= $t
       and (.type == "m.room.message" or .type == "m.room.encrypted"))] | length')"
+  if [[ "$seen" != 0 ]]; then
+    agent_outsider_hit_dump "$owner_token" "$room_url" "$since" "$outsider"
+  fi
   # 踢掉以后房间回到两个人，Bot 按私聊处理（有的 Agent 在三人房间里整个不回）。
   agent_matrix "$owner_token" POST "/_matrix/client/v3/rooms/$room_url/kick" \
     "$(jq -cn --arg u "$outsider" '{user_id: $u}')" >/dev/null
