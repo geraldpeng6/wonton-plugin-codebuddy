@@ -8,6 +8,7 @@ SMOKE_NOTE="CodeBuddy 的网页是登录页，没有应用账号体系，用户�
 # CodeBuddy 首次回答要先在容器里装 CLI，十几分钟才回；调 MCP 工具、跑命令都会先弹卡片，一个动作可能弹几张。
 EXTRA_TIMEOUT=7200
 AGENT_WAIT=860
+AGENT_CARD_WAIT=480
 AGENT_HEALTHY_WAIT=360
 extra_check() {
   agent_check_chat '请用一句话回答：codebuddy 冒烟。记住暗号：青杏。'
